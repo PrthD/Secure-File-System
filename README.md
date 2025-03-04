@@ -1,11 +1,12 @@
 # Secure File System (SFS)
 
 ## Team Information:
+
 ### Group Name - The ByteKnights
 1. Het Bharatkumar Patel, SID: 1742431, ccid: hetbhara
 2. Parth Dadhania, SID: 1722612, ccid: pdadhani
 
-A **Secure File System** project that offers:
+## A **Secure File System** project that offers:
 
 - Encrypted file names and contents
 - Unix-like group and permission model
