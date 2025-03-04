@@ -24,8 +24,8 @@ A **Secure File System** project that offers:
 ## Getting Started
 
 1. **Clone** the repository.
-2. **Install** dependencies as needed (e.g., `pip install -r requirements.txt` in Python).
-3. **Run** the main application (e.g., `python sfs.py`).
+2. **Install** dependencies as needed (`pip install -r requirements.txt` in Python).
+3. **Run** the main application (`python sfs.py`).
 4. **Create/Manage** users, groups, and files via CLI commands.
 
 ---
