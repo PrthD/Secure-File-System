@@ -8,7 +8,7 @@ import os
 import json
 import base64
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple
 from .models import User, FileEntity, Directory
 from .encryption import encrypt_data, decrypt_data
 from .integrity import generate_hmac, verify_hmac
@@ -29,17 +29,11 @@ def safe_b64decode(s: str) -> str:
 
 
 def encrypt_name(plaintext: str, key: bytes) -> str:
-    """
-    Encrypt the plaintext name, then base64-URL-encode it for safe filesystem usage.
-    """
     ciphertext = encrypt_data(plaintext, key)
     return safe_b64encode(ciphertext)
 
 
 def decrypt_name(enc: str, key: bytes) -> Optional[str]:
-    """
-    Reverse of encrypt_name: decode from base64, then decrypt with Fernet.
-    """
     try:
         ct = safe_b64decode(enc)
         pt = decrypt_data(ct, key)
@@ -54,21 +48,10 @@ def get_metadata_path(dir_path: str) -> str:
 
 
 def get_directory_on_disk_path(directory: Directory) -> str:
-    """
-    Recursively determine the on-disk path for 'directory'.
-    - If directory is the root home (dir_name == 'home' and parent is None),
-      we store it in file_system/home (plaintext).
-    - Otherwise, we compute the parent's path, then join the directory's
-      encrypted_dir_name.
-    """
-    # Base case: if it's the root home
     if directory.dir_name == "home" and directory.parent is None:
         return os.path.join(SFS_DATA_FOLDER, "home")
 
-    # Otherwise, find the parent's on-disk path
     if directory.parent is None:
-        # no parent => store in file_system/<encrypted_dir_name>
-        # (this scenario is rare, but let's handle it)
         return os.path.join(SFS_DATA_FOLDER, directory.encrypted_dir_name or "unknown")
 
     parent_path = get_directory_on_disk_path(directory.parent)
@@ -76,22 +59,12 @@ def get_directory_on_disk_path(directory: Directory) -> str:
 
 
 def get_file_on_disk_path(file_entity: FileEntity, parent_dir: Directory) -> str:
-    """
-    Determine the on-disk path for this file, which is a subfolder named by
-    file_entity.encrypted_file_name inside the parent's path.
-    """
     parent_path = get_directory_on_disk_path(parent_dir)
     return os.path.join(parent_path, file_entity.encrypted_file_name or "unknown")
 
 
 def write_directory_to_disk(directory: Directory, key: bytes) -> None:
-    """
-    If directory is the special root "home" with no parent, store as file_system/home (no encryption).
-    Otherwise, encrypt its name and store it inside the parent's path.
-    """
-    # If this is the root directory named "home" (parent=None), skip encryption
     is_root_home = (directory.dir_name == "home" and directory.parent is None)
-
     if is_root_home:
         directory.encrypted_dir_name = "home"
         directory.dir_name_hmac = None
@@ -101,7 +74,6 @@ def write_directory_to_disk(directory: Directory, key: bytes) -> None:
                 directory.dir_name, key)
             directory.dir_name_hmac = generate_hmac(directory.dir_name, key)
 
-    # Now create the folder
     dir_path = get_directory_on_disk_path(directory)
     os.makedirs(dir_path, exist_ok=True)
 
@@ -116,10 +88,6 @@ def write_directory_to_disk(directory: Directory, key: bytes) -> None:
 
 
 def write_file_to_disk(file_entity: FileEntity, key: bytes, parent_dir: Directory) -> None:
-    """
-    Create a subfolder for the file, with .meta.json inside.
-    The parent directory path is determined by get_directory_on_disk_path(...).
-    """
     if file_entity.encrypted_file_name is None:
         file_entity.encrypted_file_name = encrypt_name(
             file_entity.file_name, key)
@@ -158,7 +126,7 @@ def remove_file_from_disk(file_entity: FileEntity, parent_dir: Directory) -> Non
 
 def load_directory_from_disk(encrypted_dir_name: str, key: bytes) -> Optional[Directory]:
     """
-    If encrypted_dir_name == "home", we skip decryption and treat it as the root directory.
+    If encrypted_dir_name == "home", skip encryption checks (plaintext root).
     Otherwise, decrypt & verify HMAC.
     """
     dir_path = os.path.join(SFS_DATA_FOLDER, encrypted_dir_name)
@@ -171,7 +139,6 @@ def load_directory_from_disk(encrypted_dir_name: str, key: bytes) -> Optional[Di
         if data.get("type") != "directory":
             return None
 
-        # If it's "home", skip encryption checks
         if encrypted_dir_name == "home":
             d = Directory("home", owner=None,
                           permissions=data.get("permissions", "all"))
@@ -179,12 +146,11 @@ def load_directory_from_disk(encrypted_dir_name: str, key: bytes) -> Optional[Di
             d.owner_name = data.get("owner")
             return d
 
-        # Otherwise do normal decrypt
         ptname = decrypt_name(encrypted_dir_name, key)
         if not ptname:
             return None
         dir_hmac = data.get("dir_name_hmac", "")
-        if not verify_hmac(ptname, dir_hmac, key):
+        if dir_hmac and not verify_hmac(ptname, dir_hmac, key):
             logger.warning(f"Directory HMAC mismatch for {encrypted_dir_name}")
             return None
 
@@ -214,7 +180,7 @@ def load_file_from_disk(encrypted_file_name: str, parent_encrypted_dir: str, key
         if not ptname:
             return None
         fname_hmac = data.get("file_name_hmac", "")
-        if not verify_hmac(ptname, fname_hmac, key):
+        if fname_hmac and not verify_hmac(ptname, fname_hmac, key):
             logger.warning(f"File name HMAC mismatch: {encrypted_file_name}")
             return None
 
@@ -231,12 +197,18 @@ def load_file_from_disk(encrypted_file_name: str, parent_encrypted_dir: str, key
         return None
 
 
-def scan_directory_recursive(directory: Directory, key: bytes, user_map: Dict[str, User]) -> None:
+def scan_directory_recursive(directory: Directory, key: bytes, user_map: Dict[str, User]) -> Tuple[List[Directory], List[FileEntity]]:
     """
-    Recursively load subdirectories/files from disk. We'll attach the correct .parent references.
+    Recursively discover subdirectories/files from disk. 
+    DOES NOT CLEAR directory.files or directory.subdirectories.
+    Instead, returns newly discovered objects as lists, so the caller can decide how to handle them.
     """
+
+    new_subdirs: List[Directory] = []
+    new_files: List[FileEntity] = []
+
     if not directory.encrypted_dir_name:
-        return
+        return (new_subdirs, new_files)
 
     if directory.encrypted_dir_name == "home" and directory.parent is None:
         dir_path = os.path.join(SFS_DATA_FOLDER, "home")
@@ -246,12 +218,9 @@ def scan_directory_recursive(directory: Directory, key: bytes, user_map: Dict[st
         dir_path = os.path.join(parent_path, directory.encrypted_dir_name)
 
     if not os.path.isdir(dir_path):
-        return
+        return (new_subdirs, new_files)
 
-    # Clear out existing
-    directory.files = []
-    directory.subdirectories = []
-
+    # List items in this on-disk folder
     for item in os.listdir(dir_path):
         if item == ".meta.json":
             continue
@@ -259,6 +228,7 @@ def scan_directory_recursive(directory: Directory, key: bytes, user_map: Dict[st
         meta_file = os.path.join(fullp, ".meta.json")
         if not os.path.exists(meta_file):
             continue
+
         with open(meta_file, "r", encoding="utf-8") as f:
             meta = json.load(f)
         ttype = meta.get("type")
@@ -268,13 +238,19 @@ def scan_directory_recursive(directory: Directory, key: bytes, user_map: Dict[st
                 subdir.parent = directory
                 if subdir.owner_name and subdir.owner_name in user_map:
                     subdir.owner = user_map[subdir.owner_name]
-                directory.subdirectories.append(subdir)
-                scan_directory_recursive(subdir, key, user_map)
+                new_subdirs.append(subdir)
+                # Recurse
+                sub_sdirs, sub_files = scan_directory_recursive(
+                    subdir, key, user_map)
+                new_subdirs.extend(sub_sdirs)
+                new_files.extend(sub_files)
         elif ttype == "file":
             fe = load_file_from_disk(item, directory.encrypted_dir_name, key)
             if fe:
                 if fe.owner_name and fe.owner_name in user_map:
                     fe.owner = user_map[fe.owner_name]
-                directory.files.append(fe)
+                new_files.append(fe)
         else:
             logger.warning(f"Unknown object type in {meta_file}")
+
+    return (new_subdirs, new_files)

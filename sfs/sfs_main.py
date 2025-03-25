@@ -1,22 +1,32 @@
-"""
-Module: sfs_main.py
-Description: Single entry point for the SFS, with a single CLI that handles both admin tasks
-             (addgroup, adduser) and user tasks (login, logout, cd, ls, touch, echo, etc.).
-             Updated so that each new user's home directory has 'group' permission, allowing
-             same-group users to see it (but see file names as encrypted).
-"""
-
 import os
 import logging
 from sfs.authentication import AuthManager
 from sfs.encryption import generate_key
 from sfs.models import User, Directory
 from sfs.filesystem import FileSystem
-from sfs.disk_storage import SFS_DATA_FOLDER, write_directory_to_disk, scan_directory_recursive
+from sfs.disk_storage import SFS_DATA_FOLDER, write_directory_to_disk, scan_directory_recursive, load_directory_from_disk
 from sfs.permission import change_permission
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ADDED: Persist the key to a file so that the same key is used every session.
+KEYFILE_PATH = os.path.join(SFS_DATA_FOLDER, "sfs_key.bin")
+
+
+def load_or_create_key() -> bytes:
+    """
+    Loads the encryption key from disk if present; otherwise generates a new key once,
+    saves it, and reuses it on subsequent runs.
+    """
+    if os.path.exists(KEYFILE_PATH):
+        with open(KEYFILE_PATH, "rb") as f:
+            return f.read()
+    else:
+        new_key = generate_key()
+        with open(KEYFILE_PATH, "wb") as f:
+            f.write(new_key)
+        return new_key
 
 
 def main():
@@ -24,30 +34,38 @@ def main():
     if not os.path.exists(SFS_DATA_FOLDER):
         os.makedirs(SFS_DATA_FOLDER)
 
-    # Initialize authentication manager
     auth_manager = AuthManager()
-    # Generate a single encryption key for everything
-    key = generate_key()
 
-    # Create an "admin" user for controlling groups/users.
+    # CHANGED: Instead of generating a new key each time, load/create once.
+    key = load_or_create_key()
+
     try:
         admin_user = auth_manager.create_user(
-            "admin", "adminpass", is_admin=True)
+            "admin", "adminpass", is_admin=True
+        )
     except ValueError:
         admin_user = auth_manager.get_user("admin")
 
-    # Create or load the "home" root directory (plaintext "home" folder on disk)
-    root_dir = Directory("home", owner=admin_user, permissions="all")
-    write_directory_to_disk(root_dir, key)
+    existing_home = load_directory_from_disk("home", key)
+    if existing_home is not None:
+        # We have an existing home directory on disk - reuse it
+        root_dir = existing_home
+        # Optionally, ensure it has the correct owner or perms:
+        root_dir.owner = admin_user
+        root_dir.permissions = "all"
+    else:
+        # If there's no "home" on disk, create it fresh
+        root_dir = Directory("home", owner=admin_user, permissions="all")
+        write_directory_to_disk(root_dir, key)
 
-    # Build the FileSystem object
     fs = FileSystem(root_dir, key)
 
-    # Re-scan from disk in case there is an existing structure
+    # For the initial load, we can do a minimal scan if you wish
     user_map = {u.username: u for u in auth_manager.users.values()}
-    scan_directory_recursive(root_dir, key, user_map)
+    subdirs, files = scan_directory_recursive(root_dir, key, user_map)
+    # In a bigger system, unify them with root_dir. For now, let's skip.
 
-    current_user = None  # No one is logged in at start
+    current_user = None
 
     print("Welcome to the Secure File System. Type 'help' for commands, 'exit' to quit.")
 
@@ -81,7 +99,6 @@ def main():
             continue
 
         if parts[0] == "addgroup":
-            # e.g. addgroup team1
             if not current_user or not current_user.is_admin:
                 print("Only admin can create groups.")
                 continue
@@ -96,7 +113,6 @@ def main():
                 print(str(e))
 
         elif parts[0] == "adduser":
-            # e.g. adduser User1 pass1 team1
             if not current_user or not current_user.is_admin:
                 print("Only admin can add users.")
                 continue
@@ -107,17 +123,16 @@ def main():
             try:
                 newu = auth_manager.create_user(uname, pwd, grp)
                 print(f"User '{uname}' created in group '{grp}'.")
-                # Make them a home directory in /home with 'group' permission
                 user_home = Directory(uname, owner=newu, permissions='group')
                 root_dir.add_subdirectory(user_home)
                 write_directory_to_disk(user_home, key)
                 print(
-                    f"Home directory '/home/{uname}' created with 'group' permission.")
+                    f"Home directory '/home/{uname}' created with 'group' permission."
+                )
             except ValueError as e:
                 print(str(e))
 
         elif parts[0] == "login":
-            # e.g. login User1 pass1
             if len(parts) < 3:
                 print("Usage: login <username> <password>")
                 continue
@@ -125,8 +140,7 @@ def main():
             if auth_manager.login(uname, pwd):
                 current_user = auth_manager.get_user(uname)
                 print(f"You are now logged in as {current_user.username}.")
-                # Move the FileSystem to that user's home if it exists
-                # then do an integrity check
+                # Move the FileSystem to that user's home if it exists, then do an integrity check
                 found_home = None
                 for sd in root_dir.subdirectories:
                     if sd.dir_name == current_user.username:
@@ -136,7 +150,6 @@ def main():
                     fs.current_directory = found_home
                     fs.check_user_home_integrity(current_user, found_home)
                 else:
-                    # If they don't have a home, default to /home
                     fs.current_directory = root_dir
             else:
                 print("Login failed. Invalid username/password.")
@@ -275,7 +288,6 @@ def main():
                 continue
             target_name = parts[1]
             new_perm = parts[2]
-            # Find the file or directory in the current directory
             found_target = None
             for f in fs.current_directory.files:
                 if f.file_name == target_name:

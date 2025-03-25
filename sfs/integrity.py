@@ -10,20 +10,29 @@ from cryptography.hazmat.backends import default_backend
 logger = logging.getLogger(__name__)
 
 
-def generate_hmac(data: str, key: bytes) -> str:
+def generate_hmac(data: str | bytes, key: bytes) -> str:
     try:
+        if isinstance(data, str):
+            data_bytes = data.encode("utf-8")
+        else:
+            data_bytes = data
+
         h = hmac.HMAC(key, hashes.SHA256(), backend=default_backend())
-        h.update(data.encode("utf-8"))
+        h.update(data_bytes)
         return h.finalize().hex()
     except Exception as e:
         logger.error(f"Error generating HMAC: {e}")
         raise
 
 
-def verify_hmac(data: str, hmac_value: str, key: bytes) -> bool:
+def verify_hmac(data: str | bytes, hmac_value: str, key: bytes) -> bool:
     try:
+        if isinstance(data, str):
+            data_bytes = data.encode("utf-8")
+        else:
+            data_bytes = data
         h = hmac.HMAC(key, hashes.SHA256(), backend=default_backend())
-        h.update(data.encode("utf-8"))
+        h.update(data_bytes)
         h.verify(bytes.fromhex(hmac_value))
         return True
     except Exception:

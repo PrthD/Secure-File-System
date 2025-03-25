@@ -1,11 +1,19 @@
 """
 Module: filesystem.py
-Description: Implements file/directory operations and includes a 'cd ..' feature plus
-             showing unauthorized file names as encrypted names.
+Description: Implements file/directory operations, including:
+  - 'cd ..' navigation,
+  - permission checks,
+  - automatic detection of tampering (HMAC mismatch) or
+    legitimate changes (valid HMAC but different) by other users.
+
+Notes:
+  - We store a dictionary of last-known HMACs for each home directory
+    in memory only (lost if SFS restarts).
+  - If you want to persist this data, you'd store it in metadata on disk.
 """
 
 import logging
-from typing import List
+from typing import List, Dict
 from .models import User, Directory, FileEntity
 from .permission import has_permission
 from .disk_storage import (
@@ -13,7 +21,8 @@ from .disk_storage import (
     write_file_to_disk,
     remove_directory_from_disk,
     remove_file_from_disk,
-    scan_directory_recursive
+    scan_directory_recursive,
+    load_file_from_disk
 )
 from .encryption import encrypt_data, decrypt_data
 from .integrity import generate_hmac, verify_hmac
@@ -27,75 +36,55 @@ class FileSystem:
         self.current_directory = root_directory
         self.key = key
 
+        # Ephemeral map to track last-known content HMACs for each user's home directory
+        # Key: Directory object (the user's home), Value: dict of {filename: lastKnownHMAC}
+        self.last_known_hmacs_map: Dict[Directory, Dict[str, str]] = {}
+
     def pwd(self) -> str:
-        # For a nicer approach, we could walk up parents to build a path like /home/User1/...
-        # But for brevity, we only show "/<current_directory.dir_name>"
         return f"/{self.current_directory.dir_name}"
 
     def ls(self, user: User) -> List[str]:
-        """
-        Lists the contents of the current directory. If user has read permission on the directory,
-        we show each subdirectory's plaintext name. For files:
-          - If user has read permission on that file, we show the plaintext name.
-          - Otherwise, we show the encrypted_file_name (like random gibberish).
-        This matches the requirement that an unauthorized user sees encrypted names.
-        """
-        dir_obj = self.current_directory
-        if not has_permission(user, dir_obj, "read"):
-            return []  # no permission to even list
-
-        # Build a list of names
+        if not has_permission(user, self.current_directory, "read"):
+            return []
         result = []
-        # Subdirectories: we always show plaintext name if we can see the directory at all
-        for sd in dir_obj.subdirectories:
+        # Subdirectories
+        for sd in self.current_directory.subdirectories:
             result.append(sd.dir_name + "/")
-
-        # Files: show plaintext name if user has read permission; otherwise show encrypted
-        for f in dir_obj.files:
+        # Files
+        for f in self.current_directory.files:
             if has_permission(user, f, "read"):
                 result.append(f.file_name)
             else:
-                # fallback to the encrypted name if it exists
                 if f.encrypted_file_name:
                     result.append(f.encrypted_file_name)
                 else:
-                    # if we haven't assigned an encrypted name yet, show placeholder
                     result.append("ENCRYPTED_FILE")
         return result
 
     def mkdir(self, user: User, dirname: str) -> bool:
-        dir_obj = self.current_directory
-        if not has_permission(user, dir_obj, "write"):
+        if not has_permission(user, self.current_directory, "write"):
             return False
+        dirname = dirname.strip()
         new_dir = Directory(dirname, owner=user, permissions='user')
-        dir_obj.add_subdirectory(new_dir)
+        self.current_directory.add_subdirectory(new_dir)
         write_directory_to_disk(new_dir, self.key)
         return True
 
     def touch(self, user: User, filename: str) -> bool:
-        dir_obj = self.current_directory
-        if not has_permission(user, dir_obj, "write"):
+        if not has_permission(user, self.current_directory, "write"):
             return False
+        filename = filename.strip()
         new_file = FileEntity(filename, user, permissions='user')
-        dir_obj.add_file(new_file)
-        # It's empty, so no content/HMAC
-        write_file_to_disk(new_file, self.key, dir_obj)
+        self.current_directory.add_file(new_file)
+        write_file_to_disk(new_file, self.key, self.current_directory)
         return True
 
     def cd(self, user: User, dirname: str) -> bool:
-        """
-        If dirname == "..", go up one level (if not at root).
-        Otherwise, look for a subdirectory with name == dirname.
-        """
         if dirname == "..":
-            # If we have a parent and we are not already at root
             if self.current_directory.parent is not None:
-                # Move up
                 self.current_directory = self.current_directory.parent
                 return True
             return False
-
-        # normal cd
         for sd in self.current_directory.subdirectories:
             if sd.dir_name == dirname:
                 if has_permission(user, sd, "read"):
@@ -120,6 +109,7 @@ class FileSystem:
         return f"File '{filename}' not found."
 
     def echo(self, user: User, filename: str, text: str) -> bool:
+        filename = filename.strip()
         for f in self.current_directory.files:
             if f.file_name == filename:
                 if not has_permission(user, f, "write"):
@@ -133,6 +123,7 @@ class FileSystem:
         return False
 
     def mv(self, user: User, old_name: str, new_name: str) -> bool:
+        old_name, new_name = old_name.strip(), new_name.strip()
         # rename file
         for f in self.current_directory.files:
             if f.file_name == old_name:
@@ -155,13 +146,12 @@ class FileSystem:
                 d.encrypted_dir_name = None
                 d.dir_name_hmac = None
                 write_directory_to_disk(d, self.key)
-                # re-scan to restore its children
                 scan_directory_recursive(d, self.key, {})
                 return True
-
         return False
 
     def rm(self, user: User, filename: str) -> bool:
+        filename = filename.strip()
         for f in self.current_directory.files:
             if f.file_name == filename:
                 if not has_permission(user, f, "write"):
@@ -172,11 +162,11 @@ class FileSystem:
         return False
 
     def rmdir(self, user: User, dirname: str) -> bool:
+        dirname = dirname.strip()
         for sd in self.current_directory.subdirectories:
             if sd.dir_name == dirname:
                 if not has_permission(user, sd, "write"):
                     return False
-                # Require empty
                 if sd.files or sd.subdirectories:
                     return False
                 self.current_directory.remove_subdirectory(sd)
@@ -184,27 +174,88 @@ class FileSystem:
                 return True
         return False
 
+    # CHANGED: Entire function replaced with an updated merging approach so that
+    # corrupt files do not vanish and only newly discovered items are added.
     def check_user_home_integrity(self, user: User, user_home: Directory) -> None:
         """
-        On login, re-scan the user's home directory from disk to detect tampering.
-        If any file or directory disappeared (or was renamed), we warn the user.
+        On login, we do two things:
+          1) Detect new/missing/corrupted files or directories.
+          2) Detect legitimate changes by an authorized user (valid HMAC changed).
+        We only warn about corrupted or changed files; we do *not* remove them from user_home.
         """
-        from .disk_storage import scan_directory_recursive
-        old_files = set(f.file_name for f in user_home.files)
-        old_subdirs = set(d.dir_name for d in user_home.subdirectories)
+        from copy import deepcopy
+        from .integrity import verify_hmac
+        from .encryption import decrypt_data
 
-        user_map = {user.username: user}  # minimal approach
-        scan_directory_recursive(user_home, self.key, user_map)
+        if user_home not in self.last_known_hmacs_map:
+            self.last_known_hmacs_map[user_home] = {}
+        known_hmacs = self.last_known_hmacs_map[user_home]
 
-        new_files = set(f.file_name for f in user_home.files)
-        new_subdirs = set(d.dir_name for d in user_home.subdirectories)
+        old_files = {f.file_name for f in user_home.files}
+        old_subdirs = {d.dir_name for d in user_home.subdirectories}
 
-        missing_files = old_files - new_files
-        missing_dirs = old_subdirs - new_subdirs
-        if missing_files or missing_dirs:
-            print(
-                "[!] Warning: Some files or directories in your home appear corrupted or renamed.")
+        # Make a dummy clone and discover what's on disk.
+        dummy_clone = deepcopy(user_home)
+        user_map = {user.username: user}
+        new_subdirs, new_files = scan_directory_recursive(
+            dummy_clone, self.key, user_map)
+
+        new_fileset = {f.file_name for f in dummy_clone.files}
+        new_subdirsset = {d.dir_name for d in dummy_clone.subdirectories}
+
+        missing_files = old_files - new_fileset
+        missing_dirs = old_subdirs - new_subdirsset
+
+        from .disk_storage import load_file_from_disk
+        changed_authorized = []
+        corrupted = []
+
+        # Check each old file for corruption or authorized changes
+        for old_f in user_home.files:
+            fname = old_f.file_name
+            if fname not in new_fileset:
+                # It's missing on disk, so skip deeper checks
+                continue
+            if not old_f.encrypted_file_name:
+                # Possibly a new empty file not fully persisted yet
+                continue
+            parent_enc = user_home.encrypted_dir_name or "home"
+            reloaded = load_file_from_disk(
+                old_f.encrypted_file_name, parent_enc, self.key)
+            if not reloaded:
+                # We couldn't decrypt or verify metadata => corrupted
+                corrupted.append(fname)
+                continue
+
+            # If reloaded, verify content HMAC
+            if reloaded.encrypted_content and reloaded.hmac:
+                if not verify_hmac(reloaded.encrypted_content, reloaded.hmac, self.key):
+                    corrupted.append(fname)
+                    continue
+                # If valid but differs from known, it's changed by an authorized user
+                old_hmac = known_hmacs.get(fname)
+                if old_hmac and old_hmac != reloaded.hmac:
+                    changed_authorized.append(fname)
+                # Update known HMAC
+                known_hmacs[fname] = reloaded.hmac
+
+        # ADDED: Merge newly discovered items into user_home
+        # so brand-new files/dirs from disk appear for the user.
+        for new_f in dummy_clone.files:
+            if new_f.file_name not in old_files:
+                user_home.files.append(new_f)
+        for new_d in dummy_clone.subdirectories:
+            if new_d.dir_name not in old_subdirs:
+                user_home.subdirectories.append(new_d)
+
+        # Summarize warnings
+        if missing_files or missing_dirs or corrupted or changed_authorized:
+            print("[!] Updates in your home directory:")
             for mf in missing_files:
-                print(f"  - Missing file: {mf}")
+                print(f"   - Missing file: {mf}")
             for md in missing_dirs:
-                print(f"  - Missing directory: {md}")
+                print(f"   - Missing directory: {md}")
+            for cf in corrupted:
+                print(f"   - Corrupted file: {cf}")
+            for ca in changed_authorized:
+                print(f"   - File changed by authorized user: {ca}")
