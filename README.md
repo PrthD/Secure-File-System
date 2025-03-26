@@ -1,39 +1,128 @@
 # Secure File System (SFS)
 
-## Team Information:
-
-### Group Name - The ByteKnights
-1. Het Bharatkumar Patel, SID: 1742431, ccid: hetbhara
-2. Parth Dadhania, SID: 1722612, ccid: pdadhani
-
-## A **Secure File System** project that offers:
-
-- Encrypted file names and contents
-- Unix-like group and permission model
-- User authentication and access control
-- Basic command-line operations (e.g., `pwd`, `ls`, `cd`, `mkdir`, `touch`, etc.)
-
-## Features
-
-- **Confidentiality**: All files and directories are stored in encrypted form.
-- **Integrity**: Each file is protected from external tampering.
-- **Multi-user Access**: Users can belong to groups and share files under Unix-like permissions.
-- **CLI-Based**: Issue commands via a simple text-based interface.
-
-## Technology Overview
-
-- **Language**: Python
-- **Encryption**: AES for content encryption, HMAC for integrity
-- **Data Storage**: JSON, database, or file-based metadata (encrypted)
-- **Authentication**: Password hashing (bcrypt or PBKDF2)
-
-## Getting Started
-
-1. **Clone** the repository.
-2. **Install** dependencies as needed (`pip install -r requirements.txt` in Python).
-3. **Run** the main application (`python sfs.py`).
-4. **Create/Manage** users, groups, and files via CLI commands.
+A secure file system with encryption, access control, and integrity verification. Supports multi-user groups, Unix-like permissions, and a CLI for secure file operations.
 
 ---
 
-**Happy Securing!**
+## 📂 Project Overview
+
+The **Secure File System (SFS)** is a command-line based file management system designed for untrusted environments. It integrates robust cryptographic techniques with Unix-style permission controls to provide secure multi-user file operations.
+
+Key security pillars include:
+
+- 🔒 **Confidentiality**: File names, contents, and metadata are encrypted.
+- 🛡️ **Integrity**: HMAC-based tamper detection alerts users of unauthorized modifications.
+- 🔑 **Access Control**: Role-based access with support for user/group/other permission levels.
+- 👤 **Authentication**: Secure password handling using bcrypt hashing.
+
+---
+
+## 👨‍💻 Team
+
+**Group Name**: The ByteKnights
+
+- Het Bharatkumar Patel (SID: 1742431, CCID: hetbhara)
+- Parth Dadhania (SID: 1722612, CCID: pdadhani)
+
+---
+
+## 🚀 Features
+
+- ✅ Encrypted file and directory names & contents (Fernet AES)
+- ✅ CLI-based interface with commands like `login`, `mkdir`, `cd`, `ls`, `touch`, `cat`, `echo`, `mv`, etc.
+- ✅ Unix-like permission model (`user`, `group`, `all`)
+- ✅ Integrity verification with SHA-256 HMAC
+- ✅ Secure password storage (bcrypt)
+- ✅ Admin capabilities for creating users and groups
+- ✅ Corruption alerting for external file tampering
+
+---
+
+## 🧰 Technologies Used
+
+| Category        | Technology/Tool         |
+| --------------- | ----------------------- |
+| Language        | Python                  |
+| Encryption      | `cryptography` (Fernet) |
+| Integrity Check | HMAC (SHA-256)          |
+| Authentication  | `bcrypt`                |
+| Data Storage    | Encrypted JSON files    |
+| Version Control | Git + GitHub            |
+| Automation      | `run.sh` bash script    |
+
+---
+
+## ⚙️ Setup Instructions
+
+### 🔧 Requirements
+
+- Python 3.8 or above
+- Git / Bash-compatible terminal (Linux/macOS/Windows Git Bash)
+
+### 🚀 Quick Start
+
+```bash
+# Clone the repository
+git clone https://github.com/PrthD/Secure-File-System.git
+cd Secure-File-System
+
+# Make run script executable (Linux/macOS)
+chmod +x run.sh
+
+# Run the app
+./run.sh
+```
+
+This will:
+
+- Create a virtual environment (if not already created)
+- Install dependencies from `requirements.txt`
+- Launch the Secure File System CLI
+
+---
+
+## 🧪 Default Admin Credentials
+
+```bash
+Username: admin
+Password: adminpass
+```
+
+Use this account to create users and groups via the `adduser` and `addgroup` commands.
+
+---
+
+## 📘 Example Commands
+
+```bash
+login admin adminpass
+addgroup team1
+adduser alice password123 team1
+mkdir secure_folder
+touch notes.txt
+echo notes.txt Hello world!
+cat notes.txt
+chmod notes.txt group
+logout
+```
+
+---
+
+## 🧑‍🏫 User Roles
+
+- **Admin**: Can create users/groups
+- **User**: Can create/manage personal files and directories
+- **Group**: Enables collaborative access via permission settings
+
+---
+
+## 🛡️ Security Highlights
+
+- All data stored on disk (including filenames) is encrypted.
+- HMAC-based integrity check detects tampering from outside SFS.
+- External users see only encrypted content, preserving confidentiality.
+- Permission checks enforced before all read/write operations.
+
+---
+
+**Happy Securing! 🔐**
